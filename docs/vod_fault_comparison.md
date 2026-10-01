@@ -56,6 +56,11 @@ files exist and that condition IDs match. Only the `clean` config is for
 training. Use a smaller batch if memory requires it. If `--device cpu` makes
 the reconstruction export too slow, choose `cuda` when the GPU is free.
 
+If only the clean LiDAR export exists, add `--conditions clean` to the
+preparation command and train with the clean config. Once faulty and
+reconstructed validation scans have been exported, rerun preparation without
+that option before the three-condition evaluation.
+
 Find the clean training checkpoint under the SVEFusion `output/VoD_models/`
 directory, then run:
 

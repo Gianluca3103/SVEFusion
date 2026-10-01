@@ -18,7 +18,8 @@ import yaml
 CONDITIONS = ("clean", "faulty", "reconstructed")
 
 
-def configure(sve_root: Path, export_root: Path, vod_public: Path) -> list[Path]:
+def configure(sve_root: Path, export_root: Path, vod_public: Path,
+              conditions: tuple[str, ...]) -> list[Path]:
     cfgs = sve_root / "tools" / "cfgs"
     with (cfgs / "dataset_configs" / "Vod_fusion.yaml").open() as handle:
         dataset_base = yaml.safe_load(handle)
@@ -31,7 +32,7 @@ def configure(sve_root: Path, export_root: Path, vod_public: Path) -> list[Path]
             raise FileNotFoundError(path)
     expected_splits = None
     outputs = []
-    for condition in CONDITIONS:
+    for condition in conditions:
         root = (export_root / "lidar" / condition).resolve()
         manifest = root / "export_manifest.json"
         if not manifest.is_file():
@@ -77,7 +78,8 @@ def configure(sve_root: Path, export_root: Path, vod_public: Path) -> list[Path]
     return outputs
 
 
-def prepare_infos(export_root: Path, sve_root: Path, workers: int) -> None:
+def prepare_infos(export_root: Path, sve_root: Path, workers: int,
+                  conditions: tuple[str, ...]) -> None:
     from easydict import EasyDict
     from pcdet.datasets.vod.vod_dataset import VodDataset
 
@@ -93,7 +95,7 @@ def prepare_infos(export_root: Path, sve_root: Path, workers: int) -> None:
         ids = (clean / "ImageSets" / f"{split}.txt").read_text().split()
         if [str(info["point_cloud"]["lidar_idx"]) for info in infos] != ids:
             raise ValueError(f"Unexpected {split} info IDs")
-        destinations = CONDITIONS if split == "val" else ("clean",)
+        destinations = conditions if split == "val" else ("clean",)
         for condition in destinations:
             target = export_root / "lidar" / condition / f"vod_infos_{split}.pkl"
             with target.open("wb") as handle:
@@ -107,14 +109,20 @@ def main() -> None:
     parser.add_argument("--export-root", type=Path, required=True)
     parser.add_argument("--vod-public", type=Path, required=True)
     parser.add_argument("--prepare-infos", action="store_true")
+    parser.add_argument("--conditions", nargs="+", choices=CONDITIONS,
+                        default=CONDITIONS,
+                        help="Use 'clean' alone to prepare training before other exports exist")
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     if args.workers < 1:
         parser.error("--workers must be positive")
-    for path in configure(args.sve_root, args.export_root, args.vod_public):
+    conditions = tuple(dict.fromkeys(args.conditions))
+    if "clean" not in conditions:
+        parser.error("The clean condition is required for training and shared infos")
+    for path in configure(args.sve_root, args.export_root, args.vod_public, conditions):
         print(path)
     if args.prepare_infos:
-        prepare_infos(args.export_root, args.sve_root, args.workers)
+        prepare_infos(args.export_root, args.sve_root, args.workers, conditions)
 
 
 if __name__ == "__main__":
