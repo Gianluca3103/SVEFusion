@@ -3,6 +3,7 @@ import argparse
 import datetime
 import glob
 import os
+import pickle
 from pathlib import Path
 from test import repeat_eval_ckpt
 
@@ -10,8 +11,10 @@ import torch
 import torch.nn as nn
 from tensorboardX import SummaryWriter
 
+from eval_utils import eval_utils
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
+from pcdet.datasets.vod.kitti_object_eval_python.eval import get_official_eval_result
 from pcdet.models import build_network, model_fn_decorator
 from pcdet.utils import common_utils
 from train_utils.optimization import build_optimizer, build_scheduler
@@ -42,6 +45,8 @@ def parse_config():
     parser.add_argument('--max_waiting_mins', type=int, default=0, help='max waiting minutes')
     parser.add_argument('--start_epoch', type=int, default=0, help='')
     parser.add_argument('--num_epochs_to_eval', type=int, default=0, help='number of checkpoints to be evaluated')
+    parser.add_argument('--val_interval', type=int, default=0,
+                        help='validate on VoD and report 3D AP_R40 every N epochs, including the final epoch')
     parser.add_argument('--save_to_file', action='store_true', default=False, help='')
     
     parser.add_argument('--use_tqdm_to_record', action='store_true', default=False, help='if True, the intermediate losses will not be logged to file, only tqdm will be used')
@@ -67,6 +72,8 @@ def parse_config():
 
 def main():
     args, cfg = parse_config()
+    if args.val_interval < 0:
+        raise ValueError('--val_interval must be nonnegative')
     if args.launcher == 'none':
         dist_train = False
         total_gpus = 1
@@ -78,6 +85,9 @@ def main():
             args.tcp_port, args.local_rank, backend='nccl'
         )
         dist_train = True
+
+    if args.val_interval and dist_train:
+        raise NotImplementedError('--val_interval currently supports single-GPU training only')
 
     if args.batch_size is None:
         args.batch_size = cfg.OPTIMIZATION.BATCH_SIZE_PER_GPU
@@ -169,6 +179,50 @@ def main():
         last_epoch=last_epoch, optim_cfg=cfg.OPTIMIZATION
     )
 
+    val_callback = None
+    if args.val_interval:
+        val_set, val_loader, _ = build_dataloader(
+            dataset_cfg=cfg.DATA_CONFIG,
+            class_names=cfg.CLASS_NAMES,
+            batch_size=args.batch_size,
+            dist=False,
+            workers=args.workers,
+            logger=logger,
+            training=False,
+        )
+        if len(val_set) == 0:
+            raise ValueError('Validation dataset is empty; prepare vod_infos_val.pkl first')
+
+        def val_callback(epoch):
+            result_dir = output_dir / 'eval' / 'during_train' / f'epoch_{epoch}' / 'val'
+            try:
+                eval_utils.eval_one_epoch(
+                    cfg, args, model, val_loader, epoch, logger,
+                    dist_test=False, result_dir=result_dir,
+                )
+                with (result_dir / 'result.pkl').open('rb') as handle:
+                    predictions = pickle.load(handle)
+                infos = val_set.vod_infos
+                expected_ids = [str(info['point_cloud']['lidar_idx']) for info in infos]
+                actual_ids = [str(item['frame_id']) for item in predictions]
+                if actual_ids != expected_ids:
+                    raise ValueError('Validation prediction IDs do not match the VoD infos')
+                _, scores = get_official_eval_result(
+                    [info['annos'] for info in infos], predictions, cfg.CLASS_NAMES,
+                )
+                ap = {name: float(scores[f'{name}_3d/moderate_R40'])
+                      for name in cfg.CLASS_NAMES}
+                mean_ap = sum(ap.values()) / len(ap)
+                logger.info('Validation epoch %d: 3D AP_R40 moderate Car=%.2f Pedestrian=%.2f '
+                            'Cyclist=%.2f mAP=%.2f', epoch, ap['Car'], ap['Pedestrian'],
+                            ap['Cyclist'], mean_ap)
+                if tb_log is not None:
+                    for name, value in ap.items():
+                        tb_log.add_scalar(f'val/3d_AP_R40_moderate/{name}', value, epoch)
+                    tb_log.add_scalar('val/3d_mAP_R40_moderate', mean_ap, epoch)
+            finally:
+                model.train()
+
     # -----------------------start training---------------------------
     logger.info('**********************Start training %s/%s(%s)**********************'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
@@ -197,7 +251,9 @@ def main():
         use_logger_to_record=not args.use_tqdm_to_record, 
         show_gpu_stat=not args.wo_gpu_stat,
         use_amp=args.use_amp,
-        cfg=cfg
+        cfg=cfg,
+        val_interval=args.val_interval,
+        val_callback=val_callback,
     )
 
     if hasattr(train_set, 'use_shared_memory') and train_set.use_shared_memory:
@@ -205,6 +261,11 @@ def main():
 
     logger.info('**********************End training %s/%s(%s)**********************\n\n\n'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
+
+    if args.val_interval:
+        if tb_log is not None:
+            tb_log.close()
+        return
 
     logger.info('**********************Start evaluation %s/%s(%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))

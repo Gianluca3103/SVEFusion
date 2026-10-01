@@ -46,14 +46,18 @@ cd "$SVE"
 
 cd "$SVE/tools"
 "$PYTHON" train.py --cfg_file cfgs/VoD_models/SVEFusion_vod_clean.yaml \
-  --batch_size 4 --workers 4 --extra_tag vod_clean_trained
+  --batch_size 4 --workers 4 --extra_tag vod_clean_trained \
+  --val_interval 5
 ```
 
 The preparation command writes three dataset/model configs and shared
 validation infos. It disables ground-truth database sampling, so no fusion GT
 database is required. It checks that all validation files and calibration
 files exist and that condition IDs match. Only the `clean` config is for
-training. Use a smaller batch if memory requires it. If `--device cpu` makes
+training. With `--val_interval 5`, validation runs on the same GPU after every
+fifth epoch and at the final epoch. The training log and TensorBoard report
+Car, Pedestrian, Cyclist, and mean moderate 3D AP_R40. Set the interval to 1
+for every epoch. Use a smaller batch if memory requires it. If `--device cpu` makes
 the reconstruction export too slow, choose `cuda` when the GPU is free.
 
 If only the clean LiDAR export exists, add `--conditions clean` to the
