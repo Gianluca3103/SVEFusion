@@ -3,7 +3,7 @@ import io as sysio
 import numba
 import numpy as np
 
-from pcdet.datasets.kitti.kitti_object_eval_python.rotate_iou import rotate_iou_gpu_eval
+from pcdet.datasets.vod_evaluation.rotate_iou_cpu import rotate_iou_eval
 
 
 @numba.jit
@@ -114,7 +114,7 @@ def image_box_overlap(boxes, query_boxes, criterion=-1):
 
 
 def bev_box_overlap(boxes, qboxes, criterion=-1):
-    riou = rotate_iou_gpu_eval(boxes, qboxes, criterion)
+    riou = rotate_iou_eval(boxes, qboxes, criterion)
     return riou
 
 
@@ -148,7 +148,7 @@ def d3_box_overlap_kernel(boxes, qboxes, rinc, criterion=-1):
 
 
 def d3_box_overlap(boxes, qboxes, criterion=-1):
-    rinc = rotate_iou_gpu_eval(boxes[:, [0, 2, 3, 5, 6]],
+    rinc = rotate_iou_eval(boxes[:, [0, 2, 3, 5, 6]],
                                qboxes[:, [0, 2, 3, 5, 6]], 2)
     d3_box_overlap_kernel(boxes, qboxes, rinc, criterion)
     return rinc

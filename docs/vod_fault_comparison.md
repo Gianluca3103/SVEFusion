@@ -57,7 +57,9 @@ files exist and that condition IDs match. Only the `clean` config is for
 training. With `--val_interval 5`, validation runs on the same GPU after every
 fifth epoch and at the final epoch. The training log and TensorBoard report
 Car, Pedestrian, Cyclist, and mean moderate 3D AP_R40. Set the interval to 1
-for every epoch. Use a smaller batch if memory requires it. If `--device cpu` makes
+for every epoch. The AP_R40 evaluator uses the bundled CPU rotated-IoU
+implementation for compatibility with current Numba releases, so validation
+adds time to those epochs. Use a smaller batch if memory requires it. If `--device cpu` makes
 the reconstruction export too slow, choose `cuda` when the GPU is free.
 
 If only the clean LiDAR export exists, add `--conditions clean` to the

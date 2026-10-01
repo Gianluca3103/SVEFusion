@@ -14,7 +14,6 @@ from tensorboardX import SummaryWriter
 from eval_utils import eval_utils
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
-from pcdet.datasets.vod.kitti_object_eval_python.eval import get_official_eval_result
 from pcdet.models import build_network, model_fn_decorator
 from pcdet.utils import common_utils
 from train_utils.optimization import build_optimizer, build_scheduler
@@ -192,11 +191,13 @@ def main():
         )
         if len(val_set) == 0:
             raise ValueError('Validation dataset is empty; prepare vod_infos_val.pkl first')
+        # The bundled KITTI evaluator returns AP_R40 and matches the final scorer.
+        val_set.vod_eva = False
 
         def val_callback(epoch):
             result_dir = output_dir / 'eval' / 'during_train' / f'epoch_{epoch}' / 'val'
             try:
-                eval_utils.eval_one_epoch(
+                scores = eval_utils.eval_one_epoch(
                     cfg, args, model, val_loader, epoch, logger,
                     dist_test=False, result_dir=result_dir,
                 )
@@ -207,9 +208,6 @@ def main():
                 actual_ids = [str(item['frame_id']) for item in predictions]
                 if actual_ids != expected_ids:
                     raise ValueError('Validation prediction IDs do not match the VoD infos')
-                _, scores = get_official_eval_result(
-                    [info['annos'] for info in infos], predictions, cfg.CLASS_NAMES,
-                )
                 ap = {name: float(scores[f'{name}_3d/moderate_R40'])
                       for name in cfg.CLASS_NAMES}
                 mean_ap = sum(ap.values()) / len(ap)
