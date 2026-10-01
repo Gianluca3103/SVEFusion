@@ -109,7 +109,8 @@ class VodDataset(DatasetTemplate):
         self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
 
     def get_pc(self, idx):
-        lidar_file = self.root_split_path / 'lidar' / ('%s.bin' % idx)
+        lidar_root = Path(self.dataset_cfg.get('LIDAR_POINTS_ROOT', self.root_split_path / 'lidar'))
+        lidar_file = lidar_root / ('%s.bin' % idx)
         
         if self.sensor == 'LiDAR':
             assert lidar_file.exists()
@@ -130,7 +131,7 @@ class VodDataset(DatasetTemplate):
             points = (points - means)/stds
             
         elif self.sensor == 'Fusion':
-            lidar_file = self.root_split_path / 'lidar' / ('%s.bin' % idx)
+            lidar_file = lidar_root / ('%s.bin' % idx)
             if self.sim_info_path is not None and self.use_fog == 1:
                 lidar_file = self.sim_info_path / ('%s.bin' % idx)
             if self.sim_info_path_list is not None and self.use_fog == 2 and self.train:
@@ -142,7 +143,8 @@ class VodDataset(DatasetTemplate):
                     self.fog_I = 0
             l_points = np.fromfile(str(lidar_file), dtype=np.float32).reshape(-1, 4)
             
-            radar_file = self.root_split_path / 'radar_5f' / ('%s.bin' % idx)
+            radar_root = Path(self.dataset_cfg.get('RADAR_POINTS_ROOT', self.root_split_path / 'radar_5f'))
+            radar_file = radar_root / ('%s.bin' % idx)
             assert radar_file.exists()
             r_points = np.fromfile(str(radar_file), dtype=np.float32).reshape(-1, 7)
             means = [0, 0, 0, -13.0, -3.0, -0.1, 0]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
@@ -167,8 +169,10 @@ class VodDataset(DatasetTemplate):
         return image
 
     def get_image_shape(self, idx):
-        img_file = self.root_split_path / 'image_2' / ('%s.jpg' % idx)
-        print(img_file)
+        image_dir = self.root_split_path / 'image_2'
+        img_file = image_dir / ('%s.jpg' % idx)
+        if not img_file.exists():
+            img_file = image_dir / ('%s.png' % idx)
         assert img_file.exists()
         return np.array(io.imread(img_file).shape[:2], dtype=np.int32)
 
@@ -202,9 +206,11 @@ class VodDataset(DatasetTemplate):
             calib_file = self.root_split_path / 'calib' / ('%s.txt' % idx)
             return calibration_kitti.Calibration(calib_file)
         else:
-            l_calib_file = self.root_split_path / 'lidar_calib' / ('%s.txt' % idx)
+            lidar_calib_root = Path(self.dataset_cfg.get('LIDAR_CALIB_ROOT', self.root_split_path / 'lidar_calib'))
+            l_calib_file = lidar_calib_root / ('%s.txt' % idx)
             assert l_calib_file.exists()
-            r_calib_file = self.root_split_path / 'radar_calib' / ('%s.txt' % idx)
+            radar_calib_root = Path(self.dataset_cfg.get('RADAR_CALIB_ROOT', self.root_split_path / 'radar_calib'))
+            r_calib_file = radar_calib_root / ('%s.txt' % idx)
             assert r_calib_file.exists()
             return calibration_kitti.Calibration(l_calib_file), calibration_kitti.Calibration(r_calib_file)
             
@@ -884,6 +890,4 @@ if __name__ == '__main__':
             data_path= Path('/PATH/rlfusion_5f/'),
             save_path= Path('/PATH/rlfusion_5f/')
         )
-
-
 
