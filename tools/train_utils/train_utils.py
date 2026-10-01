@@ -12,7 +12,7 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                     rank, tbar, total_it_each_epoch, dataloader_iter, tb_log=None, leave_pbar=False, 
                     use_logger_to_record=False, logger=None, logger_iter_interval=50, cur_epoch=None, 
                     total_epochs=None, ckpt_save_dir=None, ckpt_save_time_interval=300, show_gpu_stat=False,
-                    use_amp=False, quiet_progress=False):
+                    use_amp=False, quiet_progress=False, progress_bar=None, progress_state=None):
     if total_it_each_epoch == len(train_loader):
         dataloader_iter = iter(train_loader)
     ckpt_save_cnt = 1
@@ -21,15 +21,15 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp, init_scale=optim_cfg.get('LOSS_SCALE_FP16', 2.0**16))
     
     if rank == 0:
-        pbar = tqdm.tqdm(total=total_it_each_epoch, leave=leave_pbar,
-                         desc=f'train {cur_epoch + 1}/{total_epochs}' if quiet_progress else 'train',
-                         dynamic_ncols=True, mininterval=1.0)
+        pbar = progress_bar if quiet_progress else tqdm.tqdm(
+            total=total_it_each_epoch, leave=leave_pbar, desc='train', dynamic_ncols=True)
         data_time = common_utils.AverageMeter()
         batch_time = common_utils.AverageMeter()
         forward_time = common_utils.AverageMeter()
         losses_m = common_utils.AverageMeter()
 
     end = time.time()
+    epoch_start = end
     for cur_it in range(start_it, total_it_each_epoch):
         try:
             batch = next(dataloader_iter)
@@ -125,7 +125,10 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
             else:                
                 pbar.update()
                 if quiet_progress:
-                    pbar.set_postfix(loss=f'{loss.item():.4f}', avg=f'{losses_m.avg:.4f}', refresh=False)
+                    progress_state['epoch'] = cur_epoch + 1
+                    progress_state['phase'] = 'train'
+                    progress_state['train_loss'] = f'{losses_m.avg:.4f}'
+                    pbar.set_postfix_str(progress_state['display'](), refresh=False)
                 else:
                     pbar.set_postfix(dict(total_it=accumulated_iter))
                     tbar.set_postfix(disp_dict)
@@ -138,7 +141,7 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                     tb_log.add_scalar('train/' + key, val, accumulated_iter)
             
             # save intermediate ckpt every {ckpt_save_time_interval} seconds         
-            time_past_this_epoch = pbar.format_dict['elapsed']
+            time_past_this_epoch = time.time() - epoch_start if quiet_progress else pbar.format_dict['elapsed']
             if time_past_this_epoch // ckpt_save_time_interval >= ckpt_save_cnt:
                 ckpt_name = ckpt_save_dir / 'latest_model'
                 save_checkpoint(
@@ -147,7 +150,7 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                 logger.info(f'Save latest model to {ckpt_name}')
                 ckpt_save_cnt += 1
                 
-    if rank == 0:
+    if rank == 0 and not quiet_progress:
         pbar.close()
     return accumulated_iter
 
@@ -164,6 +167,24 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
     # use for disable data augmentation hook
     hook_config = cfg.get('HOOK', None) 
     augment_disable_flag = False
+
+    total_it_each_epoch = len(train_loader)
+    progress_state = None
+    progress_bar = None
+    if quiet_progress and rank == 0:
+        progress_state = {'epoch': start_epoch + 1, 'phase': 'train',
+                          'train_loss': '-', 'val_loss': '-', 'ap': '-',
+                          'last_refresh': time.monotonic()}
+
+        def display():
+            return ('e {epoch}/{total} {phase} | train {train_loss} | val {val_loss} | '
+                    'AP(C/P/Cy/m) {ap}').format(total=total_epochs, **progress_state)
+
+        progress_state['display'] = display
+        progress_bar = tqdm.tqdm(total=total_epochs * total_it_each_epoch,
+                                 initial=min(start_iter, total_epochs * total_it_each_epoch),
+                                 desc='VoD', dynamic_ncols=True, leave=True, mininterval=5.0)
+        progress_bar.set_postfix_str(display(), refresh=False)
 
     with tqdm.trange(start_epoch, total_epochs, desc='epochs', dynamic_ncols=True,
                      leave=(rank == 0), disable=quiet_progress) as tbar:
@@ -199,7 +220,8 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 logger=logger, logger_iter_interval=logger_iter_interval,
                 ckpt_save_dir=ckpt_save_dir, ckpt_save_time_interval=ckpt_save_time_interval, 
                 show_gpu_stat=show_gpu_stat,
-                use_amp=use_amp, quiet_progress=quiet_progress
+                use_amp=use_amp, quiet_progress=quiet_progress,
+                progress_bar=progress_bar, progress_state=progress_state
             )
 
             # save trained model
@@ -220,7 +242,10 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
 
             if (rank == 0 and val_interval > 0 and val_callback is not None and
                     (trained_epoch % val_interval == 0 or trained_epoch == total_epochs)):
-                val_callback(trained_epoch)
+                val_callback(trained_epoch, progress_bar, progress_state)
+
+    if progress_bar is not None:
+        progress_bar.close()
 
 
 def model_state_to_cpu(model_state):

@@ -20,7 +20,8 @@ def statistics_info(cfg, ret_dict, metric, disp_dict):
         '(%d, %d) / %d' % (metric['recall_roi_%s' % str(min_thresh)], metric['recall_rcnn_%s' % str(min_thresh)], metric['gt_num'])
 
 
-def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=False, result_dir=None):
+def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=False,
+                   result_dir=None, progress_bar=None, progress_state=None):
     result_dir.mkdir(parents=True, exist_ok=True)
 
     final_output_dir = result_dir / 'final_result' / 'data'
@@ -55,9 +56,8 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
 
     if cfg.LOCAL_RANK == 0:
         quiet_progress = getattr(args, 'quiet_progress', False)
-        progress_bar = tqdm.tqdm(total=len(dataloader), leave=not quiet_progress,
-                                 desc=f'val AP {epoch_id}' if quiet_progress else 'eval',
-                                 dynamic_ncols=True, mininterval=1.0)
+        eval_bar = tqdm.tqdm(total=len(dataloader), leave=True, desc='eval',
+                             dynamic_ncols=True, mininterval=1.0, disable=quiet_progress)
     start_time = time.time()
 
     
@@ -91,12 +91,19 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
         )
         det_annos += annos
         if cfg.LOCAL_RANK == 0:
-            if not quiet_progress:
-                progress_bar.set_postfix(disp_dict)
-            progress_bar.update()
+            if quiet_progress:
+                progress_state['phase'] = 'val AP'
+                progress_bar.set_postfix_str(progress_state['display'](), refresh=False)
+                now = time.monotonic()
+                if now - progress_state['last_refresh'] >= 5:
+                    progress_bar.refresh()
+                    progress_state['last_refresh'] = now
+            else:
+                eval_bar.set_postfix(disp_dict)
+                eval_bar.update()
 
     if cfg.LOCAL_RANK == 0:
-        progress_bar.close()
+        eval_bar.close()
 
     if dist_test:
         rank, world_size = common_utils.get_dist_info()

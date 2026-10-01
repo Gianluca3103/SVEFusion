@@ -5,6 +5,7 @@ import glob
 import logging
 import os
 import pickle
+import time
 from pathlib import Path
 from test import repeat_eval_ckpt
 
@@ -22,7 +23,8 @@ from train_utils.optimization import build_optimizer, build_scheduler
 from train_utils.train_utils import train_model
 
 
-def measure_validation_loss(model, val_loader, epoch, quiet_progress=False):
+def measure_validation_loss(model, val_loader, epoch, quiet_progress=False,
+                            progress_bar=None, progress_state=None):
     """Evaluate the training objective on unaugmented validation examples."""
     previous_modes = {module: module.training for module in model.modules()}
     model.train()
@@ -34,7 +36,8 @@ def measure_validation_loss(model, val_loader, epoch, quiet_progress=False):
     total_samples = 0
     try:
         with torch.no_grad(), tqdm.tqdm(val_loader, desc=f'val loss {epoch}',
-                                        dynamic_ncols=True, leave=False, mininterval=1.0) as batches:
+                                        dynamic_ncols=True, leave=False, mininterval=1.0,
+                                        disable=quiet_progress) as batches:
             for batch in batches:
                 load_data_to_gpu(batch)
                 result, _, _ = model(batch)
@@ -42,6 +45,14 @@ def measure_validation_loss(model, val_loader, epoch, quiet_progress=False):
                 total_loss += result['loss'].mean().item() * batch_size
                 total_samples += batch_size
                 if quiet_progress:
+                    progress_state['phase'] = 'val loss'
+                    progress_state['val_loss'] = f'{total_loss / total_samples:.4f}'
+                    progress_bar.set_postfix_str(progress_state['display'](), refresh=False)
+                    now = time.monotonic()
+                    if now - progress_state['last_refresh'] >= 5:
+                        progress_bar.refresh()
+                        progress_state['last_refresh'] = now
+                else:
                     batches.set_postfix(loss=f'{total_loss / total_samples:.4f}', refresh=False)
     finally:
         for module, was_training in previous_modes.items():
@@ -76,7 +87,7 @@ def parse_config():
     parser.add_argument('--val_interval', type=int, default=0,
                         help='validate on VoD and report 3D AP_R40 every N epochs, including the final epoch')
     parser.add_argument('--quiet_progress', action='store_true',
-                        help='show compact progress bars, validation loss, and AP; keep detailed logs in the log file')
+                        help='show one persistent progress bar with losses and AP; keep detailed logs in the log file')
     parser.add_argument('--save_to_file', action='store_true', default=False, help='')
     
     parser.add_argument('--use_tqdm_to_record', action='store_true', default=False, help='if True, the intermediate losses will not be logged to file, only tqdm will be used')
@@ -229,14 +240,16 @@ def main():
         # The bundled KITTI evaluator returns AP_R40 and matches the final scorer.
         val_set.vod_eva = False
 
-        def val_callback(epoch):
+        def val_callback(epoch, progress_bar=None, progress_state=None):
             result_dir = output_dir / 'eval' / 'during_train' / f'epoch_{epoch}' / 'val'
             try:
-                val_loss = measure_validation_loss(model, val_loader, epoch, args.quiet_progress)
+                val_loss = measure_validation_loss(model, val_loader, epoch, args.quiet_progress,
+                                                   progress_bar, progress_state)
                 logger.info('Validation epoch %d: loss=%.4f', epoch, val_loss)
                 scores = eval_utils.eval_one_epoch(
                     cfg, args, model, val_loader, epoch, logger,
                     dist_test=False, result_dir=result_dir,
+                    progress_bar=progress_bar, progress_state=progress_state,
                 )
                 with (result_dir / 'result.pkl').open('rb') as handle:
                     predictions = pickle.load(handle)
@@ -252,10 +265,11 @@ def main():
                             'Cyclist=%.2f mAP=%.2f', epoch, ap['Car'], ap['Pedestrian'],
                             ap['Cyclist'], mean_ap)
                 if args.quiet_progress:
-                    tqdm.tqdm.write('Epoch %d | val loss %.4f | 3D AP_R40 moderate: '
-                                    'Car %.2f, Pedestrian %.2f, Cyclist %.2f, mAP %.2f' %
-                                    (epoch, val_loss, ap['Car'], ap['Pedestrian'],
-                                     ap['Cyclist'], mean_ap))
+                    progress_state['phase'] = 'train'
+                    progress_state['ap'] = ('%.1f/%.1f/%.1f/%.1f' %
+                                            (ap['Car'], ap['Pedestrian'], ap['Cyclist'], mean_ap))
+                    progress_bar.set_postfix_str(progress_state['display'](), refresh=True)
+                    progress_state['last_refresh'] = time.monotonic()
                 if tb_log is not None:
                     tb_log.add_scalar('val/loss', val_loss, epoch)
                     for name, value in ap.items():
