@@ -2,6 +2,7 @@ import _init_path
 import argparse
 import datetime
 import glob
+import logging
 import os
 import pickle
 from pathlib import Path
@@ -9,15 +10,43 @@ from test import repeat_eval_ckpt
 
 import torch
 import torch.nn as nn
+import tqdm
 from tensorboardX import SummaryWriter
 
 from eval_utils import eval_utils
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
-from pcdet.models import build_network, model_fn_decorator
+from pcdet.models import build_network, load_data_to_gpu, model_fn_decorator
 from pcdet.utils import common_utils
 from train_utils.optimization import build_optimizer, build_scheduler
 from train_utils.train_utils import train_model
+
+
+def measure_validation_loss(model, val_loader, epoch, quiet_progress=False):
+    """Evaluate the training objective on unaugmented validation examples."""
+    previous_modes = {module: module.training for module in model.modules()}
+    model.train()
+    for module in model.modules():
+        if isinstance(module, (nn.modules.batchnorm._BatchNorm, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
+            module.eval()
+
+    total_loss = 0.0
+    total_samples = 0
+    try:
+        with torch.no_grad(), tqdm.tqdm(val_loader, desc=f'val loss {epoch}',
+                                        dynamic_ncols=True, leave=False, mininterval=1.0) as batches:
+            for batch in batches:
+                load_data_to_gpu(batch)
+                result, _, _ = model(batch)
+                batch_size = batch['batch_size']
+                total_loss += result['loss'].mean().item() * batch_size
+                total_samples += batch_size
+                if quiet_progress:
+                    batches.set_postfix(loss=f'{total_loss / total_samples:.4f}', refresh=False)
+    finally:
+        for module, was_training in previous_modes.items():
+            module.train(was_training)
+    return total_loss / total_samples
 
 
 def parse_config():
@@ -46,6 +75,8 @@ def parse_config():
     parser.add_argument('--num_epochs_to_eval', type=int, default=0, help='number of checkpoints to be evaluated')
     parser.add_argument('--val_interval', type=int, default=0,
                         help='validate on VoD and report 3D AP_R40 every N epochs, including the final epoch')
+    parser.add_argument('--quiet_progress', action='store_true',
+                        help='show compact progress bars, validation loss, and AP; keep detailed logs in the log file')
     parser.add_argument('--save_to_file', action='store_true', default=False, help='')
     
     parser.add_argument('--use_tqdm_to_record', action='store_true', default=False, help='if True, the intermediate losses will not be logged to file, only tqdm will be used')
@@ -104,6 +135,10 @@ def main():
 
     log_file = output_dir / ('train_%s.log' % datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     logger = common_utils.create_logger(log_file, rank=cfg.LOCAL_RANK)
+    if args.quiet_progress:
+        for handler in logger.handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                handler.setLevel(logging.WARNING)
 
     # log to file
     logger.info('**********************Start logging**********************')
@@ -197,6 +232,8 @@ def main():
         def val_callback(epoch):
             result_dir = output_dir / 'eval' / 'during_train' / f'epoch_{epoch}' / 'val'
             try:
+                val_loss = measure_validation_loss(model, val_loader, epoch, args.quiet_progress)
+                logger.info('Validation epoch %d: loss=%.4f', epoch, val_loss)
                 scores = eval_utils.eval_one_epoch(
                     cfg, args, model, val_loader, epoch, logger,
                     dist_test=False, result_dir=result_dir,
@@ -214,7 +251,13 @@ def main():
                 logger.info('Validation epoch %d: 3D AP_R40 moderate Car=%.2f Pedestrian=%.2f '
                             'Cyclist=%.2f mAP=%.2f', epoch, ap['Car'], ap['Pedestrian'],
                             ap['Cyclist'], mean_ap)
+                if args.quiet_progress:
+                    tqdm.tqdm.write('Epoch %d | val loss %.4f | 3D AP_R40 moderate: '
+                                    'Car %.2f, Pedestrian %.2f, Cyclist %.2f, mAP %.2f' %
+                                    (epoch, val_loss, ap['Car'], ap['Pedestrian'],
+                                     ap['Cyclist'], mean_ap))
                 if tb_log is not None:
+                    tb_log.add_scalar('val/loss', val_loss, epoch)
                     for name, value in ap.items():
                         tb_log.add_scalar(f'val/3d_AP_R40_moderate/{name}', value, epoch)
                     tb_log.add_scalar('val/3d_mAP_R40_moderate', mean_ap, epoch)
@@ -246,12 +289,13 @@ def main():
         logger=logger, 
         logger_iter_interval=args.logger_iter_interval,
         ckpt_save_time_interval=args.ckpt_save_time_interval,
-        use_logger_to_record=not args.use_tqdm_to_record, 
-        show_gpu_stat=not args.wo_gpu_stat,
+        use_logger_to_record=not (args.use_tqdm_to_record or args.quiet_progress),
+        show_gpu_stat=not (args.wo_gpu_stat or args.quiet_progress),
         use_amp=args.use_amp,
         cfg=cfg,
         val_interval=args.val_interval,
         val_callback=val_callback,
+        quiet_progress=args.quiet_progress,
     )
 
     if hasattr(train_set, 'use_shared_memory') and train_set.use_shared_memory:

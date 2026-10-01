@@ -11,7 +11,8 @@ from pcdet.utils import common_utils, commu_utils
 def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, accumulated_iter, optim_cfg,
                     rank, tbar, total_it_each_epoch, dataloader_iter, tb_log=None, leave_pbar=False, 
                     use_logger_to_record=False, logger=None, logger_iter_interval=50, cur_epoch=None, 
-                    total_epochs=None, ckpt_save_dir=None, ckpt_save_time_interval=300, show_gpu_stat=False, use_amp=False):
+                    total_epochs=None, ckpt_save_dir=None, ckpt_save_time_interval=300, show_gpu_stat=False,
+                    use_amp=False, quiet_progress=False):
     if total_it_each_epoch == len(train_loader):
         dataloader_iter = iter(train_loader)
     ckpt_save_cnt = 1
@@ -20,7 +21,9 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp, init_scale=optim_cfg.get('LOSS_SCALE_FP16', 2.0**16))
     
     if rank == 0:
-        pbar = tqdm.tqdm(total=total_it_each_epoch, leave=leave_pbar, desc='train', dynamic_ncols=True)
+        pbar = tqdm.tqdm(total=total_it_each_epoch, leave=leave_pbar,
+                         desc=f'train {cur_epoch + 1}/{total_epochs}' if quiet_progress else 'train',
+                         dynamic_ncols=True, mininterval=1.0)
         data_time = common_utils.AverageMeter()
         batch_time = common_utils.AverageMeter()
         forward_time = common_utils.AverageMeter()
@@ -121,8 +124,11 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
                         logger.info(gpu_info)
             else:                
                 pbar.update()
-                pbar.set_postfix(dict(total_it=accumulated_iter))
-                tbar.set_postfix(disp_dict)
+                if quiet_progress:
+                    pbar.set_postfix(loss=f'{loss.item():.4f}', avg=f'{losses_m.avg:.4f}', refresh=False)
+                else:
+                    pbar.set_postfix(dict(total_it=accumulated_iter))
+                    tbar.set_postfix(disp_dict)
                 # tbar.refresh()
 
             if tb_log is not None:
@@ -151,14 +157,16 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 lr_warmup_scheduler=None, ckpt_save_interval=1, max_ckpt_save_num=50,
                 merge_all_iters_to_one_epoch=False, use_amp=False,
                 use_logger_to_record=False, logger=None, logger_iter_interval=None, ckpt_save_time_interval=None,
-                show_gpu_stat=False, cfg=None, val_interval=0, val_callback=None):
+                show_gpu_stat=False, cfg=None, val_interval=0, val_callback=None,
+                quiet_progress=False):
     accumulated_iter = start_iter
 
     # use for disable data augmentation hook
     hook_config = cfg.get('HOOK', None) 
     augment_disable_flag = False
 
-    with tqdm.trange(start_epoch, total_epochs, desc='epochs', dynamic_ncols=True, leave=(rank == 0)) as tbar:
+    with tqdm.trange(start_epoch, total_epochs, desc='epochs', dynamic_ncols=True,
+                     leave=(rank == 0), disable=quiet_progress) as tbar:
         total_it_each_epoch = len(train_loader)
         if merge_all_iters_to_one_epoch:
             assert hasattr(train_loader.dataset, 'merge_all_iters_to_one_epoch')
@@ -191,7 +199,7 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 logger=logger, logger_iter_interval=logger_iter_interval,
                 ckpt_save_dir=ckpt_save_dir, ckpt_save_time_interval=ckpt_save_time_interval, 
                 show_gpu_stat=show_gpu_stat,
-                use_amp=use_amp
+                use_amp=use_amp, quiet_progress=quiet_progress
             )
 
             # save trained model

@@ -54,7 +54,10 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
     model.eval()
 
     if cfg.LOCAL_RANK == 0:
-        progress_bar = tqdm.tqdm(total=len(dataloader), leave=True, desc='eval', dynamic_ncols=True)
+        quiet_progress = getattr(args, 'quiet_progress', False)
+        progress_bar = tqdm.tqdm(total=len(dataloader), leave=not quiet_progress,
+                                 desc=f'val AP {epoch_id}' if quiet_progress else 'eval',
+                                 dynamic_ncols=True, mininterval=1.0)
     start_time = time.time()
 
     
@@ -88,7 +91,8 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
         )
         det_annos += annos
         if cfg.LOCAL_RANK == 0:
-            progress_bar.set_postfix(disp_dict)
+            if not quiet_progress:
+                progress_bar.set_postfix(disp_dict)
             progress_bar.update()
 
     if cfg.LOCAL_RANK == 0:
