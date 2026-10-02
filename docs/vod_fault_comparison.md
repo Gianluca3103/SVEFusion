@@ -32,6 +32,7 @@ CACHE=/path/to/vod_range5_full_cache
 RECON=/path/to/range_view_checkpoint.pt
 EXPORT=/path/to/sve_vod_comparison
 PYTHON=/path/to/cuda_environment/bin/python
+FAULT_PYTHON=/path/to/reconstruction_environment/bin/python
 export PYTHONPATH="$REPO:$SVE${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$REPO"
@@ -93,6 +94,55 @@ The scorer refuses predictions with different validation IDs or ordering. It
 uses the same evaluation implementation and IoU thresholds for all conditions.
 For a quick pipeline check, append `--limit 10` to the export command; those
 partial-set AP values are not full validation results.
+
+## Official test split inference
+
+`test.py` with the validation configs above still reads the labeled `val` split.
+Use `prepare_vod_test.py` to create separate configs for the official `test`
+IDs. Public VoD test labels are unavailable, so this writes predictions but
+does not produce test AP. The script leaves the validation configs and infos
+in place.
+
+```bash
+cd "$SVE"
+"$PYTHON" tools/prepare_vod_test.py \
+  --export-root "$EXPORT" --vod-public "$VOD" --conditions clean --workers 4
+
+cd "$SVE/tools"
+"$PYTHON" test.py \
+  --cfg_file cfgs/VoD_models/SVEFusion_vod_clean_test.yaml \
+  --ckpt "$CKPT" --batch_size 1 --workers 2 \
+  --extra_tag official_test --eval_tag clean --save_to_file
+```
+
+For a matched faulty comparison, first generate test faults with the same
+fault plan and radar stack policy used for validation. The fault generator
+resumes existing samples and stores them under `$CACHE/samples/test`.
+
+```bash
+cd "$REPO"
+"$FAULT_PYTHON" -m scripts.create_vod_range_view_dataset \
+  --vod-root "$VOD" --radar-cache-root "$CACHE/radar" \
+  --output-root "$CACHE/samples" --split test
+
+cd "$SVE"
+"$PYTHON" tools/prepare_vod_test.py \
+  --export-root "$EXPORT" --vod-public "$VOD" \
+  --conditions clean faulty --fault-samples-root "$CACHE/samples" --workers 4
+
+cd "$SVE/tools"
+for condition in clean faulty; do
+  "$PYTHON" test.py \
+    --cfg_file "cfgs/VoD_models/SVEFusion_vod_${condition}_test.yaml" \
+    --ckpt "$CKPT" --batch_size 1 --workers 2 \
+    --extra_tag official_test_matched --eval_tag "$condition" --save_to_file
+done
+```
+
+Fault generation may skip recording warm-up frames with fewer than five radar
+scans. In that case, preparation selects the same subset of official test IDs
+for both conditions. The saved `result.pkl` and KITTI-format text files can
+be inspected or submitted to an official evaluator if one is available.
 
 The raw VoD files are present in this Windows workspace under
 `C:\Users\gianl\Desktop\Thesis\View-Of-Delft dataset\view_of_delft_PUBLIC`.
