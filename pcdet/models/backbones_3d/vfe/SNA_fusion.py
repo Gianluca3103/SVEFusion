@@ -167,14 +167,19 @@ class SNAFusion(VFETemplate):
             radar_mask = radar_batch == batch_id
             
             radar_global_indices = torch.where(radar_mask)[0].cpu().numpy()
+            if len(radar_global_indices) == 0:
+                raise ValueError(f"No reference voxels for batch item {batch_id.item()}")
             
             batch_lidar = lidar_coords[lidar_mask].cpu().numpy()
             batch_radar = radar_coords[radar_mask].cpu().numpy()
 
             radar_tree = cKDTree(batch_radar)
-            distances, local_indices = radar_tree.query(batch_lidar, k=k_neighbors)
-            
-            global_indices = np.full(local_indices.shape, -1)
+            _, local_indices = radar_tree.query(batch_lidar, k=min(k_neighbors, len(batch_radar)))
+            local_indices = np.asarray(local_indices).reshape(len(batch_lidar), -1)
+            if local_indices.shape[1] < k_neighbors:
+                local_indices = np.pad(local_indices,
+                                       ((0, 0), (0, k_neighbors - local_indices.shape[1])),
+                                       mode='edge')
             global_indices = radar_global_indices[local_indices]
             
             neighbors_idx[lidar_mask] = torch.tensor(global_indices, 

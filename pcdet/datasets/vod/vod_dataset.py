@@ -625,6 +625,13 @@ class VodDataset(DatasetTemplate):
                     radar_pts_rect = calib.lidar_to_rect(radar_points[:, 0:3])
                     radar_fov_flag = self.get_fov_flag(radar_pts_rect, img_shape, calib)
                     radar_points = radar_points[radar_fov_flag]
+                # SNA and the sparse backbones require a voxel for each sensor.
+                # Keep an empty scan identifiable with a single, low-intensity
+                # point inside the configured detection range.
+                if len(lidar_points) == 0:
+                    lidar_points = np.array([[0.1, 0.0, -2.9, 0.0]], dtype=np.float32)
+                if len(radar_points) == 0:
+                    radar_points = np.array([[0.1, 0.0, -2.9, 0.0, 0.0, 0.0, 0.0]], dtype=np.float32)
                 # if len(gt_boxes_lidar):
                 #     radar_point_indices = roiaware_pool3d_utils.points_in_boxes_cpu(
                 #         torch.from_numpy(radar_points[:, 0:3]), torch.from_numpy(gt_boxes_lidar)
@@ -890,4 +897,3 @@ if __name__ == '__main__':
             data_path= Path('/PATH/rlfusion_5f/'),
             save_path= Path('/PATH/rlfusion_5f/')
         )
-
