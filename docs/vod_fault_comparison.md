@@ -1,5 +1,68 @@
 # SVEFusion VoD clean, faulty, reconstructed comparison
 
+## Published SVEFusion preprocessing baseline
+
+For a paper-aligned **clean** reference, use `prepare_vod_official.py` before
+the fault comparison below. It links unmodified VoD LiDAR and seven-channel
+five-frame radar into the `rlfusion_5f` layout described by SVEFusion/L4DR,
+generates the original train and validation infos with point counts, and
+builds the fusion ground-truth sampling database. The generated model YAML
+preserves the upstream field-of-view, augmentation, voxelization, and VoD
+evaluation settings. The generated test YAML switches only to the public
+unlabeled test IDs. Use a separate directory from the custom detector export.
+
+```bash
+SVE=/path/to/SVEFusion
+VOD=/path/to/view_of_delft_PUBLIC
+PYTHON=/path/to/svefusion_environment/bin/python
+OFFICIAL=/path/to/svefusion_official_vod
+
+cd "$SVE"
+"$PYTHON" tools/prepare_vod_official.py \
+  --vod-public "$VOD" --data-root "$OFFICIAL" \
+  --prepare-infos --prepare-database --workers 4
+
+cd "$SVE/tools"
+"$PYTHON" test.py \
+  --cfg_file cfgs/VoD_models/SVEFusion_vod_official_clean.yaml \
+  --ckpt /path/to/svefusion_vod.pth --batch_size 1 --workers 2
+```
+
+This clean baseline uses the published input processing; it is independent of
+the custom LiDAR fault and reconstruction exports below. Those conditions are
+outside the SVEFusion paper and must be regenerated from full scans to avoid
+the forward-point filter used by the earlier exporter. Keep the detector
+checkpoint fixed across conditions. Public test IDs have no public labels, so
+the test config saves predictions without local AP.
+
+To compare the same validation IDs with clean and faulty LiDAR under those
+published transforms, use the full-scan fault artifacts. This creates separate
+condition roots, preserving raw radar and calibration. It automatically limits
+both roots to the same frames if the fault cache is incomplete.
+
+```bash
+CACHE=/path/to/vod_range5_full_cache
+MATCHED=/path/to/svefusion_official_matched
+"$PYTHON" "$SVE/tools/prepare_vod_official_faults.py" \
+  --clean-root "$OFFICIAL" --fault-samples-root "$CACHE/samples" \
+  --output-root "$MATCHED" --split val
+
+cd "$SVE/tools"
+for condition in clean faulty; do
+  "$PYTHON" test.py \
+    --cfg_file "cfgs/VoD_models/SVEFusion_vod_official_${condition}_val.yaml" \
+    --ckpt /path/to/svefusion_vod.pth --batch_size 1 --workers 2 \
+    --extra_tag upstream_processing --eval_tag "$condition"
+done
+```
+
+Add `--reconstructed-export-root /path/to/lidar/reconstructed` if the previous
+reconstruction export is available. When that export contains only forward
+points, the preparation script restores unmodified rear LiDAR from the raw
+scan, leaving SVEFusion's own camera FoV filter to choose model inputs. The
+reconstruction itself remains a custom intervention. Use `--split test` for
+matched unlabeled test predictions once test fault artifacts exist.
+
 Train **one SVEFusion model on clean LiDAR plus five-frame radar**, then evaluate
 that same checkpoint on the same VoD validation IDs with clean, faulty, and
 reconstructed LiDAR. Radar is identical in all three evaluations. The output
